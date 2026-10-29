@@ -1,64 +1,98 @@
-# 🐢 Duvardan Kaçan Kaplumbağa (`turtle_duvar_py`)
+# Duvardan Kaçan Kaplumbağa (turtle_duvar_py)
 
-<p align="center">
-  <img src="https://img.shields.io/badge/ROS2-Humble-blue?style=for-the-badge&logo=ros" alt="ROS2 Humble"/>
-  <img src="https://img.shields.io/badge/Python-3.10-yellow?style=for-the-badge&logo=python" alt="Python 3.10"/>
-  <img src="https://img.shields.io/badge/Lisans-Apache--2.0-green?style=for-the-badge" alt="Apache 2.0"/>
-  <img src="https://img.shields.io/badge/Durum-Tamamlandı-brightgreen?style=for-the-badge" alt="Durum"/>
-</p>
-
-**Geliştirici:** Furkan Ortatepe ([@furkanortatepe](https://github.com/furkanortatepe))
-
-Bu proje, **ROS 2 (Humble)** üzerinde `turtlesim` simülasyonundaki kaplumbağanın duvarlara çarpmadan otonom olarak gezinmesini sağlayan bir Python paketidir (`turtle_duvar_py`).
+**Hazırlayan:** Furkan Ortatepe  
+**Altyapı:** ROS 2 Humble / Python 3 (`rclpy`)
 
 ---
 
-## 📋 Ödev Gereksinimleri ve Karşılanan Özellikler
+## 1. Projenin Amacı ve Gerçek Hayattaki Karşılığı
 
-1. **Paket (`turtle_duvar_py`)**: `rclpy`, `geometry_msgs` ve `turtlesim` bağımlılıklarıyla oluşturulmuştur.
-2. **Abone (`Subscriber`)**: `/turtle1/pose` (`turtlesim/msg/Pose`) konusunu dinleyerek kaplumbağanın anlık `x` ve `y` koordinatlarını alır.
-3. **Yayıncı (`Publisher`)**: `/turtle1/cmd_vel` (`geometry_msgs/msg/Twist`) konusuna hız komutları gönderir. `x` veya `y` değeri `1.0`'dan küçük ya da `10.0`'dan büyük olduğunda kaplumbağa dönerek yön değiştirir ve duvardan uzaklaşır.
-4. **Log (`get_logger().info()`)**: Saniyede bir kez (`1.0` sn periyotlu timer ile) kaplumbağanın anlık konumunu ve durumunu terminale yazdırır.
-5. **Bonus (Parametreler)**: İleri hız (`linear_speed`), dönüş hızı (`angular_speed`), alt sınır (`min_limit`) ve üst sınır (`max_limit`) değerleri ROS 2 parametresi olarak tanımlanmıştır ve çalışma anında değiştirilebilir.
+Bu çalışmada, ROS 2 üzerindeki `turtlesim` simülasyon ortamında hareket eden bir kaplumbağanın kendi konumunu sürekli takip ederek pencere sınırlarına (duvarlara) çarpmadan otonom şekilde yön değiştirmesi amaçlanmıştır.
 
----
+### Sıfırdan Başlayanlar İçin: Bu Sistem Gerçek Hayatta Nasıl Kullanılır?
 
-## 🧩 Sistem Mimarisi ve Veri Akış Diyagramı
+Simülasyon ekranında gördüğümüz kaplumbağayı, evlerimizde çalışan **akıllı bir robot süpürge** ya da bir fabrikada yük taşıyan **otonom mobil robot (AMR)** olarak düşünebiliriz:
 
-```mermaid
-flowchart LR
-    T["🐢 /turtlesim<br/>(Simülasyon Düğümü)"] -->|"/turtle1/pose<br/>(turtlesim/msg/Pose)<br/>x, y, theta"| D["🧠 /duvardan_kacan<br/>(Kontrol Düğümü)"]
-    D -->|"/turtle1/cmd_vel<br/>(geometry_msgs/msg/Twist)<br/>linear.x, angular.z"| T
-    D -->|"1 Hz Timer<br/>get_logger().info()"| L["💻 Terminal Log Çıktısı"]
-```
+1. **Konum Okuma (Sensör / Odometri - Abone):** Gerçek bir robot, tekerleklerindeki enkoderlerden, LiDAR sensöründen veya iç mekan konumlandırma sisteminden odanın neresinde olduğunu (`x` ve `y` koordinatlarını) sürekli okur. Bizim projemizde bu görevi `/turtle1/pose` konusunu (topic) dinleyen **Subscriber (Abone)** üstlenir.
+2. **Güvenlik Sınırı (Sanal Duvar / Geofencing):** Gerçek robotların fiziksel duvara sıfır noktada çarpması istenmez; duvara belirli bir mesafe kala (örneğin 1 metre kala) "güvenlik sınırı" tanımlanır. Simülasyon ekranımız `0.0` ile `11.0` birim genişliğindedir. Bu yüzden `1.0` ve `10.0` değerlerini sanal güvenlik sınırı olarak belirledik.
+3. **Motor Kontrolü (Karar ve Hareket - Yayıncı):** Robot güvenli bölgedeyken motorlarına sadece ileri gitme komutu verilir. Ancak sensörden gelen `x` veya `y` verisi `1.0`'ın altına düşerse ya da `10.0`'ın üzerine çıkarsa, kontrolcü duvara yaklaşıldığını anlar; ileri hızı düşürüp dönüş (açısal hız) komutu göndererek robotu tekrar güvenli bölgeye çevirir. Projemizde bu komutu `/turtle1/cmd_vel` konusuna gönderen **Publisher (Yayıncı)** gerçekleştirir.
 
 ---
 
-## 📂 Paket Dosya Yapısı
+## 2. Sistemin Çalışma Mantığı (Kapalı Çevrim Kontrol)
+
+Projede iki düğüm (node) birbiriyle sürekli konuşur:
+
+- **`/turtlesim` düğümü:** Simülasyonun kendisidir. Kaplumbağanın anlık koordinatlarını `/turtle1/pose` üzerinden yayınlar ve `/turtle1/cmd_vel` üzerinden gelen hız komutlarını uygular.
+- **`/duvardan_kacan` düğümü:** Bizim yazdığımız kontrol düğümüdür. Konumu dinler, sınır kontrolü yapar, hız komutunu üretir ve saniyede bir kez terminale durum raporu (log) basar.
+
+### Düğüm ve Konu İletişim Grafiği (`rqt_graph`)
+
+Aşağıdaki `rqt_graph` çıktısında görüldüğü gibi, `/turtlesim` düğümünden çıkan `/turtle1/pose` verisi `/duvardan_kacan` düğümüne girer; işlenen karar ise `/turtle1/cmd_vel` konusu üzerinden tekrar `/turtlesim` düğümüne iletilir:
+
+![rqt_graph bağlantısı](rqt_graph.png)
+
+---
+
+## 3. Kodun ve Paket Yapısının İncelenmesi
+
+Paket içerisinde yer alan dosyalar ve görevleri şu şekildedir:
 
 ```text
 turtle_duvar_py/
-├── package.xml                  # Paket bilgileri ve bağımlılıklar (rclpy, geometry_msgs, turtlesim)
-├── setup.py                     # Python paket kurulumu ve entry_points tanımı
-├── setup.cfg                    # Script kurulum dizini yapılandırması
-├── README.md                    # Proje dokümantasyonu ve ekran görüntüleri
-├── turtlesim_ekran.png          # Turtlesim simülasyon ekran görüntüsü
-├── terminal_log.png             # Terminal log çıktısı ekran görüntüsü
-├── rqt_graph.png                # Düğüm ve konu bağlantıları (rqt_graph)
-├── resource/
-│   └── turtle_duvar_py
+├── package.xml                  # Paket bağımlılıkları (rclpy, geometry_msgs, turtlesim)
+├── setup.py                     # Düğümün (duvardan_kacan) çalıştırılabilir giriş noktası
+├── setup.cfg                    # ROS 2 paket kurulum dizini ayarı
+├── README.md                    # Proje anlatımı ve test çıktıları
 └── turtle_duvar_py/
     ├── __init__.py
-    └── duvardan_kacan.py        # Duvardan kaçan kaplumbağa ROS 2 düğümü
+    └── duvardan_kacan.py        # Ana kontrol düğümü kaynak kodu
 ```
+
+### `duvardan_kacan.py` İçerisinde Neler Yapılıyor?
+
+1. **Parametre Tanımlama (Bonus Özellik):**
+   Sabit sayılar kullanmak yerine hız ve duvar sınırları `declare_parameter` ile tanımlanmıştır:
+   - `linear_speed` (Varsayılan: `2.2`): Düz giderken uygulanan doğrusal hız.
+   - `angular_speed` (Varsayılan: `2.6`): Duvara yaklaşınca uygulanan dönüş hızı.
+   - `min_limit` (Varsayılan: `1.0`): Sol ve alt kenar için kaçış sınırı.
+   - `max_limit` (Varsayılan: `10.0`): Sağ ve üst kenar için kaçış sınırı.
+
+2. **Abone ve Yayıncı Döngüsü (`pose_callback`):**
+   `/turtle1/pose` konusundan her konum mesajı geldiğinde `msg.x` ve `msg.y` kontrol edilir. Eğer kaplumbağa `[1.0, 10.0]` aralığının dışına çıkmışsa ileri hız yavaşlatılır (`linear_speed * 0.45`) ve `cmd.angular.z = angular_speed` verilerek kavisli bir dönüşle duvardan uzaklaştırılır.
+
+3. **Zamanlayıcı ile Loglama (`log_timer_callback`):**
+   `create_timer(1.0, ...)` kullanılarak her 1 saniyede bir `get_logger().info()` çağrılır. Böylece terminal ekranı saniyede onlarca mesajla dolmak yerine, her saniye düzenli olarak kaplumbağanın koordinatını ve o anki durumunu (`Guvenli bolgede ilerliyor` veya `Sinir asildi -> Donus yapiliyor`) gösterir.
 
 ---
 
-## 🚀 Kurulum ve Çalıştırma
+## 4. Uygulama ve Test Ekran Görüntüleri
 
-### 1. Paketi Derleme
+### Simülasyon Testi (`turtlesim_ekran.png`)
+
+Düğüm çalıştırıldığında kaplumbağa merkezden (`x: 5.54, y: 5.54`) harekete başlamış, sağ sınıra (`x > 10.0`) ulaştığında yumuşak bir dönüş yaparak sol üst sınıra yönelmiş, ardından sol duvardan (`x < 1.0`) ve alt duvardan (`y < 1.0`) kaçarak duvarlara hiç çarpmadan hareketini sürdürmüştür:
+
+![Turtlesim Duvardan Kaçış Ekran Görüntüsü](turtlesim_ekran.png)
+
+### Terminal Log Çıktısı (`terminal_log.png`)
+
+Aşağıdaki terminal çıktısında saniyede bir yazdırılan konum değerleri görülmektedir. Örneğin;
+- İlk saniyelerde kaplumbağa `x: 5.54 -> 7.60 -> 9.63` şeklinde güvenli bölgede ilerlemektedir.
+- `x: 10.12, y: 7.99` koordinatına ulaştığı saniyede `max_limit` (`10.0`) aşıldığı için düğüm **`Sinir asildi -> Donus yapiliyor`** durumuna geçmiş ve kaplumbağayı döndürerek tekrar `x: 8.20` ile güvenli bölgeye sokmuştur.
+- Benzer şekilde sol kenarda `x: 0.73, y: 9.06` değerine düştüğünde `min_limit` (`1.0`) altına indiği için tekrar dönüş manevrası yapmıştır.
+
+![Terminal Log Çıktısı](terminal_log.png)
+
+---
+
+## 5. Kurulum ve Çalıştırma Adımları
+
+Paketi kendi bilgisayarınızda sıfırdan derleyip denemek için aşağıdaki adımları sırasıyla uygulayabilirsiniz:
+
+### Adım 1: Paketi Çalışma Alanına İndirme ve Derleme
 
 ```bash
+mkdir -p ~/ros2_ws/src
 cd ~/ros2_ws/src
 git clone https://github.com/furkanortatepe/turtle_duvar_py.git
 cd ~/ros2_ws
@@ -66,14 +100,14 @@ colcon build --packages-select turtle_duvar_py
 source install/setup.bash
 ```
 
-### 2. Turtlesim Simülasyonunu Başlatma (1. Terminal)
+### Adım 2: Simülasyonu Başlatma (1. Terminal)
 
 ```bash
 source /opt/ros/humble/setup.bash
 ros2 run turtlesim turtlesim_node
 ```
 
-### 3. Duvardan Kaçan Kaplumbağa Düğümünü Başlatma (2. Terminal)
+### Adım 3: Kontrol Düğümünü Başlatma (2. Terminal)
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -81,46 +115,10 @@ source ~/ros2_ws/install/setup.bash
 ros2 run turtle_duvar_py duvardan_kacan
 ```
 
----
+### Adım 4 (Bonus): Parametreleri Dışarıdan Değiştirerek Çalıştırma
 
-## ⭐ Bonus: Parametrelerle Çalıştırma
-
-Düğüm içerisinde tanımlanan ROS 2 parametreleri:
-
-| Parametre Adı | Varsayılan Değer | Açıklama |
-| :--- | :---: | :--- |
-| `linear_speed` | `2.0` | Kaplumbağanın doğrusal ileri hızı (`m/s`) |
-| `angular_speed` | `2.5` | Sınıra yaklaştığında dönüş açısal hızı (`rad/s`) |
-| `min_limit` | `1.0` | Alt duvar güvenlik sınırı (`x < min_limit` veya `y < min_limit`) |
-| `max_limit` | `10.0` | Üst duvar güvenlik sınırı (`x > max_limit` veya `y > max_limit`) |
-
-Farklı hız ve sınır değerleriyle çalıştırmak için:
+Kodun içine müdahale etmeden, terminal üzerinden hızı veya duvar sınırlarını değiştirmek isterseniz `--ros-args -p` yapısını kullanabilirsiniz. Örneğin kaplumbağayı daha hızlı sürmek ve duvarlardan daha erken (`1.5` ile `9.5` arasında) kaçmasını sağlamak için:
 
 ```bash
-ros2 run turtle_duvar_py duvardan_kacan --ros-args -p linear_speed:=3.0 -p angular_speed:=3.0 -p min_limit:=1.5 -p max_limit:=9.5
+ros2 run turtle_duvar_py duvardan_kacan --ros-args -p linear_speed:=3.0 -p angular_speed:=3.2 -p min_limit:=1.5 -p max_limit:=9.5
 ```
-
----
-
-## 📸 Ekran Görüntüleri
-
-### 1. Turtlesim Duvardan Kaçış Simülasyonu
-Kaplumbağa `1.0` ve `10.0` sınırlarına ulaştığında otomatik olarak dönerek duvarlardan kaçmaktadır:
-
-<p align="center">
-  <img src="turtlesim_ekran.png" alt="Turtlesim Duvardan Kaçan Kaplumbağa" width="500"/>
-</p>
-
-### 2. Terminal Log Çıktısı (Saniyede Bir Konum Bilgisi)
-`get_logger().info()` ile her saniye kaplumbağanın `x` ve `y` koordinatları terminale yazdırılmaktadır:
-
-<p align="center">
-  <img src="terminal_log.png" alt="Terminal Log Çıktısı" width="850"/>
-</p>
-
-### 3. Düğüm ve Konu Grafiği (`rqt_graph`)
-`/duvardan_kacan` ve `/turtlesim` düğümleri arasındaki `/turtle1/pose` ve `/turtle1/cmd_vel` haberleşmesi:
-
-<p align="center">
-  <img src="rqt_graph.png" alt="rqt_graph" width="850"/>
-</p>
